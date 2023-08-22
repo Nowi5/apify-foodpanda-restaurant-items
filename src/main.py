@@ -5,10 +5,10 @@ import time
 import re
 import json
 import os
-import configparser
 import subprocess
 import uuid
 import socket
+from bs4 import BeautifulSoup
 
 from apify import Actor
 from selenium import webdriver
@@ -44,7 +44,7 @@ async def main():
         
         
         actor_input = await Actor.get_input() or {}
-        urls = actor_input.get('urls')
+        urls = actor_input.get('urls', 'https://www.foodpanda.com.kh/en/restaurant/g4oa/')
 
         if not urls:
             Actor.log.info('No  URLs specified in actor input, exiting...')
@@ -52,8 +52,8 @@ async def main():
         
         # Enqueue the starting URLs in the default request queue
         default_queue = await Actor.open_request_queue()
-        for url in urls:
-            url = url.get('url')
+        for urlo in urls:
+            url = urlo.get('url')
             Actor.log.info(f'Enqueuing {url} ...')
             await default_queue.add_request({ 'url': url})
         
@@ -122,19 +122,50 @@ async def process_website(driver, url):
 
     scroll_to_bottom(driver)
 
-    item_wrapper = driver.find_elements(By.CSS_SELECTOR, 'li button')
+    # First get the actual web elements
+    item_elements = driver.find_elements(By.CSS_SELECTOR, 'li[data-testid="menu-product"]')
+
+    # Then extract their HTML content into a list
+    item_wrappers = [item.get_attribute('outerHTML') for item in item_elements]
 
     # Get the count of items and log them
-    item_count = len(item_wrapper)
-    Actor.log.info(f'Webscrper located {item_count} items.')
+    item_count = len(item_wrappers)
+    Actor.log.info(f'Webscraper located {item_count} items.')
 
-    # Loop through and process each div
-    for item in item_wrapper:
-        item_data = extract_item_data(item)
+    # Loop through and process each div (which is now the HTML content of each item)
+    for item_html in item_wrappers:
+        item_data = extract_item_data(item_html)
         if item_data is not None:
             item_data['url'] = url
+            item_data['restaurant'] = title
             await Actor.push_data(item_data)
-       
+
+def extract_item_data(item_html):
+    data = {}
+    soup = BeautifulSoup(item_html, 'html.parser')
+
+    # Extract dish name
+    dish_name_tag = soup.find('span', {'data-testid': 'menu-product-name'})
+    data['name'] = dish_name_tag.text if dish_name_tag else None
+
+    # Extract dish description
+    dish_description_tag = soup.find('p', {'data-testid': 'menu-product-description'})
+    data['description'] = dish_description_tag.text.strip() if dish_description_tag else None
+
+    # Extract dish price
+    dish_price_tag = soup.find('p', {'data-testid': 'menu-product-price'})
+    data['price'] = dish_price_tag.text.strip() if dish_price_tag else None
+
+    # Extract dish image URL
+    dish_image_div = soup.find('div', {'data-testid': 'menu-product-image'})
+    if dish_image_div and dish_image_div.get('style'):
+        data['image_url'] = dish_image_div.get('style').split('"')[1]
+    else:
+        data['image_url'] = None
+
+    return data
+
+
 def scroll_to_bottom(driver):
     loop_count = 0
     loop_max = LOOP_MAX
@@ -157,6 +188,7 @@ def check_captcha(driver):
         Actor.log.error(msg)
         # TODO: Handle Captcha
         raise Exception(msg)        
+        #time.sleep(50)
 
 def get_driver(proxy_port = 8080):
     # Launch a new Selenium Chrome WebDriver
@@ -181,6 +213,8 @@ async def process_capture(unique_id):
     # Ensure that the file is read using 'utf-8' encoding
     with open(captured_file_path, "r", encoding='utf-8') as file:
         lines = file.readlines()
+    
+    dataset = await Actor.open_dataset(name='captured-items')
 
     # Loop through the lines
     i = 0
@@ -198,68 +232,27 @@ async def process_capture(unique_id):
                 elif is_valid_json(response_body):
                     # Actor.log.info("Processing file JSON catpure...")                    
                     data = json.loads(response_body)
-                    await process_items(data)                    
+                    await process_items(data, dataset)                    
                 else:
                     Actor.log.error(f"Invalid JSON found on line {i + 1}.")
         i += 1
 
-async def process_items(data):
+async def process_items(data, dataset):
     if not isinstance(data, dict):
         Actor.log.error("Expected data to be a dictionary but received a %s", type(data))
         return
-
-    dataset = await Actor.open_dataset(name='captured-items')
-
+    
     try:
-        # Get vendors from organic_listing
-        status = data.get('status', {})
-        if status.get('code') != 200:
-            Actor.log.error("Error in capture %s", type(data))
+        # Check the status_code in the JSON data
+        status_code = data.get('status_code')
+        if status_code != 200:
+            Actor.log.error("Error in capture with status code: %s", status_code)
             Actor.log.debug(data)
             return
 
-        await dataset.push_data(data)
+        await dataset.push_data(data.get('data'))
     except Exception as e:
         Actor.log.error("Error while processing items: %s", str(e))
-
-def extract_item_data(item):
-    # Create an empty dictionary to store the item's data
-    data = {}
-
-    # Extract the title
-    try:
-        name_element = item.find_element(By.CSS_SELECTOR, '[data-testid="menu-product-name"]')
-        data['title'] = name_element.text if name_element else None
-    except NoSuchElementException:
-        data['title'] = None
-
-    # Extract the image URL
-    try:
-        image_element = item.find_element(By.CSS_SELECTOR, '[data-testid="menu-product-image"] .lazy-loaded-dish-photo')
-        if image_element:
-            style = image_element.get_attribute('style')
-            match = re.search(r'background-image:\s*url\("?(.*?)"?\)', style)
-            data['image_url'] = match.group(1) if match else ''
-        else:
-            data['image_url'] = ''
-    except NoSuchElementException:
-        data['image_url'] = ''
-
-    # Extract the description
-    try:
-        description_element = item.find_element(By.CSS_SELECTOR, '[data-testid="menu-product-description"]')
-        data['description'] = description_element.text if description_element else None
-    except NoSuchElementException:
-        data['description'] = None
-
-    # Extract the price
-    try:
-        price_element = item.find_element(By.CSS_SELECTOR, '[data-testid="menu-product-price"]')
-        data['price'] = price_element.text if price_element else None
-    except NoSuchElementException:
-        data['price'] = None
-
-    return data
 
 def find_open_port(start_port=8080):
     port = start_port
