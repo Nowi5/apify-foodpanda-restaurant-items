@@ -1,0 +1,12 @@
+{
+	"actorSpecification": 1,
+	"name": "Foodpanda restaurant items scraper",
+	"title": "Foodpanda restaurant items scraper",
+	"description": "Scrapes items from a restaurants on https://www.foodpanda.com.kh/ using Selenium.",
+	"version": "0.0",
+	"meta": {
+		"templateId": "python-selenium"
+	},
+	"input": "./input_schema.json",
+	"dockerfile": "./Dockerfile"
+}
