@@ -6,9 +6,13 @@ import re
 import json
 import os
 import subprocess
+import configparser
 import uuid
 import socket
 from bs4 import BeautifulSoup
+
+import time
+from python_anticaptcha import AnticaptchaClient, NoCaptchaTaskProxylessTask
 
 from apify import Actor
 from selenium import webdriver
@@ -185,10 +189,43 @@ def check_captcha(driver):
     captcha = driver.find_elements(By.CSS_SELECTOR, '.px-captcha-container')
     if captcha:
         msg = "Captcha detected! Exiting..."
-        Actor.log.error(msg)
-        # TODO: Handle Captcha
-        raise Exception(msg)        
-        #time.sleep(50)
+        Actor.log.warning(msg)
+
+        sitekey = get_captcha_sitekey(driver)
+        Actor.log.info("Sitekey detected: %s", sitekey)
+
+        api_key = get_anti_captcha_api_key()
+        client = AnticaptchaClient(api_key)
+        url = driver.current_url
+
+        invisible_captcha = True
+        token = get_captcha_token(client, url, sitekey, invisible_captcha)
+
+        form_captch_solution_submit(driver, token)
+   
+        successmsg = driver.find_element_by_class_name("recaptcha-success").text
+        Actor.log.info("Captcha solved: %s", successmsg)
+
+
+def form_captch_solution_submit(driver, token):
+    driver.execute_script(
+        "document.getElementById('g-recaptcha-response').innerHTML='{}';".format(token)
+    )
+    driver.execute_script("onSuccess('{}')".format(token))
+    time.sleep(2)
+
+def get_captcha_token(client, url, site_key, invisible):
+    task = NoCaptchaTaskProxylessTask(
+        website_url=url, website_key=site_key, is_invisible=invisible
+    )
+    job = client.createTask(task)
+    job.join(maximum_time=60 * 15)
+    return job.get_solution_response()
+
+def get_captcha_sitekey(driver):
+    return driver.find_element_by_class_name("g-recaptcha").get_attribute(
+        "data-sitekey"
+    )
 
 def get_driver(proxy_port = 8080):
     # Launch a new Selenium Chrome WebDriver
@@ -326,3 +363,64 @@ def delete_files(*file_paths):
             Actor.log.warning(f"{path} not found.")
         except Exception as e:
             Actor.log.error(f"Error deleting {path}: {e}")
+
+def get_maps_api_key():
+    # Try to get the API key from the environment variable first
+    api_key = os.getenv('GOOGLE_MAPS_API_KEY')
+
+    if api_key:
+        Actor.log.info("API key fetched from environment variable.")
+        return api_key
+
+    # If not found, then fetch it from the config.ini file
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+
+    # Check if the config file is found and read
+    if not config.sections():
+        Actor.log.error("Error: config.ini not found or empty!")
+        return None
+
+    # Check if the "GoogleMaps" section exists in the config
+    if 'GoogleMaps' not in config.sections():
+        Actor.log.error("Error: 'GoogleMaps' section not found in config.ini!")
+        return None
+
+    try:
+        api_key = config['GoogleMaps']['GOOGLE_MAPS_API_KEY']
+        Actor.log.info("API key fetched from config.ini.")
+        return api_key
+    except KeyError:
+        Actor.log.error("Error: Couldn't find the 'GOOGLE_MAPS_API_KEY' in 'GoogleMaps' section of config.ini!")
+        return None
+    
+
+def get_anti_captcha_api_key():
+    # Try to get the API key from the environment variable first
+    api_key = os.getenv('ANTI_CAPTCHA_API_KEY')
+
+    if api_key:
+        Actor.log.info("Anti_Captcha_key fetched from environment variable.")
+        return api_key
+
+    # If not found, then fetch it from the config.ini file
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+
+    # Check if the config file is found and read
+    if not config.sections():
+        Actor.log.error("Error: config.ini not found or empty!")
+        return None
+
+    # Check if the "AntiCaptcha" section exists in the config
+    if 'AntiCaptcha' not in config.sections():
+        Actor.log.error("Error: 'Anti_Captcha_key' section not found in config.ini!")
+        return None
+
+    try:
+        api_key = config['AntiCaptcha']['ANTI_CAPTCHA_API_KEY']
+        Actor.log.info("API key fetched from config.ini.")
+        return api_key
+    except KeyError:
+        Actor.log.error("Error: Couldn't find the 'ANTI_CAPTCHA_API_KEY' in config.ini!")
+        return None
